@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<!-- Halaman scanner petugas: baca QR tiket -> kirim ke Apps Script -> Status Kehadiran di Sheet berubah menjadi HADIR -->
+<html lang="id">
+<head>
+<meta charset="utf-8"> <!-- encoding teks -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"> <!-- tampilan pas di HP -->
+<meta name="theme-color" content="#12171d"> <!-- warna bilah browser HP -->
+<title>Scanner Tiket</title> <!-- judul tab -->
+<style>
+/* ---- warna dasar: gelap agar kamera dan hasil scan mudah dilihat di ruangan terang maupun redup ---- */
+:root { --bg:#12171d; --panel:#1b222b; --garis:#2b3541; --teks:#eef2f6; --redup:#9aa7b5; --ok:#1f9d55; --warn:#d99a00; --err:#d64545; --aksen:#4c8dff; } /* token warna */
+* { box-sizing: border-box; } /* ukuran elemen termasuk padding */
+body { margin:0; background:var(--bg); color:var(--teks); font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom); } /* dasar halaman, aman dari poni HP */
+.wrap { max-width:520px; margin:0 auto; padding:12px; } /* kolom tengah selebar HP */
+header { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:2px 0 12px; } /* baris judul */
+h1 { font-size:18px; margin:0; } /* judul halaman */
+.hitung { color:var(--redup); font-size:14px; } /* penghitung scan sesi ini */
+.kartu { background:var(--panel); border:1px solid var(--garis); border-radius:14px; padding:12px; margin-bottom:12px; } /* kotak isi */
+input, button { font:inherit; color:var(--teks); background:#10151b; border:1px solid var(--garis); border-radius:10px; padding:11px 13px; } /* gaya kontrol */
+button { cursor:pointer; } /* kursor tombol */
+button.utama { background:var(--aksen); border-color:var(--aksen); color:#fff; font-weight:600; } /* tombol utama */
+button:disabled { opacity:.5; cursor:default; } /* tombol nonaktif */
+:focus-visible { outline:3px solid #fff; outline-offset:2px; } /* fokus keyboard terlihat jelas */
+.baris { display:flex; gap:8px; } /* susunan sejajar */
+.baris input { flex:1; min-width:0; } /* kolom isian melebar */
+#kamera { width:100%; border-radius:12px; overflow:hidden; background:#000; min-height:240px; } /* wadah video kamera */
+#hasil { border-radius:14px; padding:18px 14px; margin-bottom:12px; background:#39434f; text-align:center; transition:background .2s; min-height:132px; display:flex; flex-direction:column; justify-content:center; } /* panel hasil: seluruh warnanya berubah sesuai status */
+#hasil.ok { background:var(--ok); } /* hijau: berhasil */
+#hasil.warn { background:var(--warn); color:#1a1300; } /* kuning: sudah check-in */
+#hasil.err { background:var(--err); } /* merah: gagal */
+#hasil .judul { font-size:15px; font-weight:600; } /* baris status */
+#hasil .nama { font-size:30px; font-weight:800; line-height:1.15; margin:4px 0; overflow-wrap:anywhere; } /* nama tamu besar agar terbaca sekilas */
+#hasil .info { font-size:15px; opacity:.92; } /* keterangan tambahan */
+#riwayat { list-style:none; margin:8px 0 0; padding:0; font-size:14px; } /* daftar scan terakhir */
+#riwayat li { display:flex; justify-content:space-between; gap:8px; padding:6px 0; border-bottom:1px solid var(--garis); } /* baris riwayat */
+#riwayat li:last-child { border-bottom:0; } /* baris terakhir tanpa garis */
+.kecil { color:var(--redup); font-size:13px; margin-top:6px; } /* teks bantuan kecil */
+.galat { color:#ff8a8a; font-size:14px; margin-top:6px; min-height:1.3em; } /* teks galat */
+[hidden] { display:none !important; } /* atribut hidden selalu menang */
+@media (prefers-reduced-motion: reduce) { #hasil { transition:none; } } /* hormati pengaturan kurangi gerak */
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header> <!-- judul + penghitung -->
+    <h1>Scanner Tiket</h1>
+    <span class="hitung" id="hitung"></span> <!-- mis. "3 berhasil" -->
+  </header>
+
+  <section class="kartu" id="gerbang"> <!-- layar PIN: tampil sebelum scanner dipakai -->
+    <b>PIN petugas</b>
+    <div class="baris" style="margin-top:8px">
+      <input id="pin" type="password" autocomplete="off" placeholder="Masukkan PIN"> <!-- isian PIN -->
+      <button class="utama" id="masuk">Masuk</button> <!-- tombol masuk -->
+    </div>
+    <div class="galat" id="galatPin"></div> <!-- pesan salah PIN -->
+  </section>
+
+  <main id="app" hidden> <!-- isi utama, tersembunyi sampai PIN diisi -->
+    <div id="hasil" role="status" aria-live="polite"> <!-- hasil scan; dibacakan pembaca layar -->
+      <div class="judul">Siap memindai</div>
+    </div>
+
+    <section class="kartu"> <!-- kamera -->
+      <div id="kamera"></div> <!-- html5-qrcode menaruh video di sini -->
+      <div class="baris" style="margin-top:10px">
+        <button class="utama" id="mulai">Buka kamera</button> <!-- nyalakan kamera -->
+        <button id="henti" hidden>Matikan kamera</button> <!-- matikan kamera -->
+      </div>
+      <div class="galat" id="galatKamera"></div> <!-- pesan galat kamera -->
+    </section>
+
+    <section class="kartu"> <!-- input manual bila QR rusak / kamera bermasalah -->
+      <b>Input kode manual</b>
+      <div class="baris" style="margin-top:8px">
+        <input id="manual" placeholder="EVT-XXXXXX" autocapitalize="characters" autocomplete="off"> <!-- isian kode -->
+        <button id="cek">Check-in</button> <!-- kirim kode -->
+      </div>
+      <ul id="riwayat"></ul> <!-- riwayat scan terakhir -->
+    </section>
+  </main>
+</div>
+
+<script src="config.js"></script> <!-- berisi API_URL (alamat Web App Apps Script) -->
+<script src="vendor/html5-qrcode.min.js"></script> <!-- pustaka pembaca QR (disimpan lokal, tanpa CDN) -->
+<script>
+(function () { // dibungkus fungsi agar variabel tidak bocor ke global
+  'use strict'; // mode ketat: menangkap kesalahan penulisan umum
+  const CFG = window.APP_CONFIG || {}; // ambil konfigurasi dari config.js
+  const API_URL = String(CFG.API_URL || ''); // alamat Web App Apps Script (/exec)
+  const PREFIX = String(CFG.KODE_PREFIX || 'EVT-').toUpperCase(); // awalan kode tiket, harus sama dengan Code.gs
+  const POLA_KODE = new RegExp('^' + PREFIX.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&') + '[A-Z0-9]{4,12}$'); // bentuk kode yang sah
+  const $ = (s) => document.querySelector(s); // singkatan pencari elemen
+  let pin = ''; // PIN petugas yang sedang dipakai
+  try { pin = sessionStorage.getItem('rsvp_pin') || ''; } catch (e) { pin = ''; } // pulihkan PIN sesi tab ini (bila browser mengizinkan)
+  let pembaca = null; // objek Html5Qrcode saat kamera menyala
+  let sibuk = false; // true selama menunggu balasan server (cegah permintaan ganda)
+  let kodeTerakhir = ''; // kode yang baru saja diproses
+  let waktuTerakhir = 0; // kapan kode itu diproses
+  let waktuAbaikan = 0; // kapan pesan "Bukan QR tiket" terakhir ditampilkan (jeda terpisah)
+  let jumlahOk = 0; // jumlah check-in berhasil pada sesi ini
+  let audio = null; // konteks audio untuk bunyi konfirmasi
+
+  function tampilkan(kelas, judul, nama, info) { // mengubah panel hasil
+    const el = $('#hasil'); // panel hasil
+    el.className = kelas; // kelas warna: ok / warn / err / kosong
+    el.textContent = ''; // kosongkan isi lama
+    const j = document.createElement('div'); j.className = 'judul'; j.textContent = judul; el.appendChild(j); // baris status (textContent: aman dari injeksi HTML)
+    if (nama) { const n = document.createElement('div'); n.className = 'nama'; n.textContent = nama; el.appendChild(n); } // nama tamu bila ada
+    if (info) { const i = document.createElement('div'); i.className = 'info'; i.textContent = info; el.appendChild(i); } // keterangan bila ada
+  } // akhir tampilkan
+
+  function bunyi(jenis) { // umpan balik suara dan getar
+    try { // gagal bunyi tidak boleh mengganggu proses utama
+      if (navigator.vibrate) navigator.vibrate(jenis === 'ok' ? 80 : [120, 60, 120]); // getar singkat (hanya didukung sebagian HP)
+      audio = audio || new (window.AudioContext || window.webkitAudioContext)(); // buat konteks audio sekali saja
+      if (audio.state === 'suspended') audio.resume(); // aktifkan bila ditunda browser
+      const o = audio.createOscillator(); const g = audio.createGain(); // pembangkit nada dan pengatur volume
+      o.frequency.value = jenis === 'ok' ? 1100 : jenis === 'warn' ? 520 : 220; // nada tinggi = berhasil, rendah = gagal
+      g.gain.value = 0.18; // volume sedang
+      o.connect(g); g.connect(audio.destination); // sambungkan ke speaker
+      o.start(); o.stop(audio.currentTime + (jenis === 'ok' ? 0.12 : 0.3)); // bunyi singkat
+    } catch (e) { /* bunyi opsional: abaikan galat */ } // tidak ada tindakan
+  } // akhir bunyi
+
+  function catatRiwayat(ikon, teks) { // menambah baris riwayat (maks. 6)
+    const ul = $('#riwayat'); // daftar riwayat
+    const li = document.createElement('li'); // baris baru
+    const a = document.createElement('span'); a.textContent = ikon + ' ' + teks; // kiri: ikon + nama/kode
+    const b = document.createElement('span'); b.className = 'kecil'; b.style.margin = '0'; b.textContent = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).replace(/\./g, ':'); // kanan: jam
+    li.appendChild(a); li.appendChild(b); // gabungkan
+    ul.insertBefore(li, ul.firstChild); // taruh paling atas
+    while (ul.children.length > 6) ul.removeChild(ul.lastChild); // buang yang terlama
+  } // akhir catatRiwayat
+
+  function ambilKode(teks) { // merapikan hasil scan menjadi kode tiket, atau '' bila bukan tiket
+    let s = String(teks || '').trim().slice(0, 200); // batasi panjang
+    const m = s.match(/[?&](?:t|kode)=([A-Za-z0-9-]+)/); // QR berisi URL dengan parameter ?t=KODE
+    if (m) s = m[1]; // pakai nilai parameter
+    s = s.toUpperCase(); // samakan huruf besar
+    return POLA_KODE.test(s) ? s : ''; // lolos pola = kode sah
+  } // akhir ambilKode
+
+  async function kirimCheckin(kode) { // memanggil Apps Script; melempar galat bila jaringan/server bermasalah
+    if (!/^https:\/\/script\.google\.com\/.+\/exec$/.test(API_URL)) throw new Error('API_URL belum diisi di config.js'); // pastikan alamat valid
+    const ac = new AbortController(); // pemutus permintaan bila terlalu lama
+    const timer = setTimeout(function () { ac.abort(); }, 15000); // batas 15 detik
+    try { // pastikan timer selalu dibersihkan
+      const resp = await fetch(API_URL, { // kirim permintaan
+        method: 'POST', // metode POST
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' }, // text/plain agar tidak memicu preflight CORS pada Apps Script
+        body: JSON.stringify({ aksi: 'checkin', pin: pin, kode: kode }), // isi permintaan
+        signal: ac.signal, // sambungkan pemutus
+        cache: 'no-store' // jangan pakai cache
+      }); // akhir fetch
+      const j = await resp.json(); // baca balasan JSON
+      if (!j.ok) { const err = new Error(j.error || 'Gagal'); err.dariServer = true; throw err; } // galat dari server (mis. PIN salah)
+      return j.data; // data hasil check-in
+    } finally { clearTimeout(timer); } // bersihkan timer
+  } // akhir kirimCheckin
+
+  async function proses(kode, dariKamera) { // alur satu kali scan
+    if (sibuk) return; // masih menunggu balasan sebelumnya
+    const sekarang = Date.now(); // waktu sekarang
+    if (dariKamera && kode === kodeTerakhir && sekarang - waktuTerakhir < 4000) return; // QR yang sama masih di depan kamera: abaikan
+    sibuk = true; kodeTerakhir = kode; waktuTerakhir = sekarang; // tandai sedang diproses
+    tampilkan('', 'Memeriksa…', '', kode); // umpan balik instan
+    try { // tangkap semua galat
+      const d = await kirimCheckin(kode); // minta server mengubah status
+      if (d.status === 'OK') { // berhasil check-in
+        jumlahOk++; $('#hitung').textContent = jumlahOk + ' berhasil'; // perbarui penghitung
+        tampilkan('ok', 'Check-in berhasil', d.nama, [d.bagian, 'pukul ' + d.waktu].filter(Boolean).join(' · ')); // hijau
+        bunyi('ok'); catatRiwayat('✅', d.nama); // suara + riwayat
+      } else if (d.status === 'DUPLIKAT') { // sudah pernah check-in
+        tampilkan('warn', 'Sudah check-in', d.nama, d.waktu ? 'pukul ' + d.waktu : ''); // kuning
+        bunyi('warn'); catatRiwayat('⚠️', d.nama + ' (ganda)'); // suara + riwayat
+      } else { // TIDAK_DITEMUKAN / TIDAK_VALID
+        tampilkan('err', 'Tiket tidak dikenal', '', 'Kode ' + kode + ' tidak ada di daftar'); // merah
+        bunyi('err'); catatRiwayat('❌', kode); // suara + riwayat
+      } // akhir percabangan status
+    } catch (err) { // galat jaringan / server
+      kodeTerakhir = ''; // izinkan scan ulang segera
+      if (err.dariServer && /PIN/.test(err.message)) { keluar('PIN ditolak. Masukkan ulang.'); } // PIN salah: kembali ke layar PIN
+      else { tampilkan('err', err.name === 'AbortError' ? 'Server terlalu lama menjawab' : 'Tidak bisa check-in', '', err.dariServer ? err.message : 'Periksa internet lalu scan lagi'); bunyi('err'); } // pesan yang bisa ditindaklanjuti
+    } finally { // selalu dijalankan
+      setTimeout(function () { sibuk = false; }, 900); // jeda singkat sebelum menerima scan berikutnya
+    } // akhir try
+  } // akhir proses
+
+  function saatTerbaca(teks) { // dipanggil html5-qrcode setiap QR terbaca
+    const kode = ambilKode(teks); // rapikan hasil scan
+    if (!kode) { // bukan QR tiket kita
+      if (!sibuk && Date.now() - waktuAbaikan > 2500) { waktuAbaikan = Date.now(); tampilkan('err', 'Bukan QR tiket', '', 'QR ini bukan tiket acara'); bunyi('err'); } // beri tahu paling sering tiap 2,5 detik, jangan membanjiri layar
+      return; // tidak perlu ke server
+    } // akhir cek kode
+    proses(kode, true); // lanjutkan ke server
+  } // akhir saatTerbaca
+
+  async function mulaiKamera() { // menyalakan kamera belakang
+    $('#galatKamera').textContent = ''; // bersihkan pesan lama
+    if (pembaca) return; // sudah menyala
+    try { // tangkap galat izin/perangkat
+      pembaca = new Html5Qrcode('kamera', { formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE], verbose: false }); // hanya baca QR
+      await pembaca.start( // mulai memindai
+        { facingMode: 'environment' }, // kamera belakang
+        { fps: 12, qrbox: function (w, h) { const s = Math.floor(Math.min(w, h) * 0.75); return { width: s, height: s }; } }, // 12 frame/dtk, kotak bidik 75% lebar
+        saatTerbaca, // callback saat QR terbaca
+        function () { /* gagal membaca satu frame: normal, abaikan */ } // callback frame kosong
+      ); // akhir start
+      $('#mulai').hidden = true; $('#henti').hidden = false; // ganti tombol
+    } catch (err) { // kamera gagal dibuka
+      pembaca = null; // reset agar bisa dicoba lagi
+      const n = (err && err.name) || ''; // jenis galat
+      $('#galatKamera').textContent = (n === 'NotAllowedError' || /permission/i.test(String(err))) ? 'Izin kamera ditolak. Ketuk ikon gembok di bilah alamat, izinkan kamera, lalu coba lagi.' // izin ditolak
+        : (n === 'NotFoundError' ? 'Kamera tidak ditemukan. Pakai input kode manual.' // tanpa kamera
+        : 'Kamera tidak bisa dibuka (' + (err && err.message || err) + '). Pakai input kode manual.'); // lainnya
+    } // akhir try
+  } // akhir mulaiKamera
+
+  async function hentikanKamera() { // mematikan kamera
+    try { if (pembaca) { await pembaca.stop(); pembaca.clear(); } } catch (e) { /* sudah berhenti: abaikan */ } // hentikan aman
+    pembaca = null; // lupakan objek lama
+    $('#mulai').hidden = false; $('#henti').hidden = true; // ganti tombol
+  } // akhir hentikanKamera
+
+  function masuk() { // memeriksa PIN yang diketik lalu membuka layar scanner
+    const v = $('#pin').value.trim(); // ambil PIN
+    if (!v) { $('#galatPin').textContent = 'Masukkan PIN terlebih dulu.'; return; } // wajib diisi
+    pin = v; // simpan di memori
+    try { sessionStorage.setItem('rsvp_pin', pin); } catch (e) { /* mode privat: abaikan */ } // simpan untuk sesi tab ini
+    $('#galatPin').textContent = ''; $('#gerbang').hidden = true; $('#app').hidden = false; // buka layar utama
+    mulaiKamera(); // langsung nyalakan kamera (klik "Masuk" dihitung sebagai interaksi pengguna)
+  } // akhir masuk
+
+  function keluar(pesan) { // kembali ke layar PIN
+    hentikanKamera(); // matikan kamera
+    pin = ''; try { sessionStorage.removeItem('rsvp_pin'); } catch (e) { /* abaikan */ } // hapus PIN
+    $('#app').hidden = true; $('#gerbang').hidden = false; $('#galatPin').textContent = pesan || ''; $('#pin').value = ''; // tampilkan layar PIN
+  } // akhir keluar
+
+  $('#masuk').onclick = masuk; // klik Masuk
+  $('#pin').onkeydown = function (e) { if (e.key === 'Enter') masuk(); }; // Enter juga masuk
+  $('#mulai').onclick = mulaiKamera; // klik Buka kamera
+  $('#henti').onclick = hentikanKamera; // klik Matikan kamera
+  $('#cek').onclick = function () { // check-in manual
+    const kode = ambilKode($('#manual').value); // rapikan kode ketikan
+    if (!kode) { tampilkan('err', 'Format kode salah', '', 'Contoh: ' + PREFIX + 'K7M2QX'); return; } // tolak format salah
+    $('#manual').value = ''; // kosongkan isian
+    proses(kode, false); // kirim ke server
+  }; // akhir klik cek
+  $('#manual').onkeydown = function (e) { if (e.key === 'Enter') $('#cek').click(); }; // Enter di kolom manual
+  window.addEventListener('error', function (ev) { console.error('Galat tak tertangkap:', ev.message); }); // catat galat tak terduga di console
+  window.addEventListener('unhandledrejection', function (ev) { console.error('Promise gagal:', ev.reason); }); // catat promise yang gagal
+
+  if (pin) { $('#gerbang').hidden = true; $('#app').hidden = false; } // PIN sesi masih ada: lewati layar PIN (kamera dinyalakan lewat tombol)
+})(); // akhir pembungkus
+</script>
+</body>
+</html>
